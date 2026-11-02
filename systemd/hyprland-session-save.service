@@ -1,0 +1,10 @@
+[Unit]
+Description=Save Hyprland window session
+# HYPRLAND_INSTANCE_SIGNATURE is imported into the systemd user manager by
+# the Caelestia lua hook when Hyprland starts. Without it there is no
+# Hyprland instance to talk to, so the service silently does nothing.
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/hyprland-session-manager/src/session_manager.py save

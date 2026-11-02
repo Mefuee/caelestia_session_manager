@@ -1,0 +1,25 @@
+{
+  "restore_timeout": 45,
+  "settle_seconds": 20,
+  "terminal_shell": "bash",
+  "launch_commands": {},
+  "ignore_classes": [
+    "",
+    "xdg-desktop-portal-gtk",
+    "xwaylandvideobridge"
+  ],
+  "single_instance": [
+    "steam",
+    "discord",
+    "spotify",
+    "org.telegram.desktop",
+    "thunderbird"
+  ],
+  "terminals": {
+    "foot": "foot --working-directory={cwd} {shell}",
+    "kitty": "kitty -d {cwd} {shell}",
+    "konsole": "konsole --workdir {cwd} -e {shell}",
+    "Alacritty": "alacritty --working-directory {cwd} -e {shell}"
+  },
+  "refresh_special": true
+}

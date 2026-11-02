@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Runtime data
+*.log
+hyprland-session.json
+session-hook.log
+
+# Local development
+.vscode/
+.idea/

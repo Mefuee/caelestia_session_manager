@@ -1,51 +1,135 @@
 #!/usr/bin/env python3
+"""Hyprland Session Manager: сохранение и восстановление оконной сессии.
+
+Использование:
+    session_manager.py save      — записать открытые окна в session.json
+    session_manager.py restore   — восстановить сессию (обычно вызывает lua-хук)
+"""
 import glob
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
 
-SESSION_FILE = os.path.expanduser("~/.cache/hyprland-session.json")
-LOG_FILE = os.path.expanduser("~/.cache/session-manager.log")
+# Пути соответствуют XDG Base Directory Specification.
+CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+STATE_HOME = os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state"))
+CACHE_HOME = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
 
-RESTORE_TIMEOUT = 45  # сколько секунд ждать появления окон
-SETTLE_SECONDS = 20   # окно должно прожить столько секунд, чтобы считаться настоящим (а не заставкой)
-TERMINAL_SHELL = "fish"
+CONFIG_DIR = os.path.join(CONFIG_HOME, "hyprland-session-manager")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+STATE_DIR = os.path.join(STATE_HOME, "hyprland-session-manager")
+CACHE_DIR = os.path.join(CACHE_HOME, "hyprland-session-manager")
+SESSION_FILE = os.path.join(STATE_DIR, "session.json")
+LOG_FILE = os.path.join(CACHE_DIR, "session-manager.log")
+LEGACY_SESSION_FILE = os.path.expanduser("~/.cache/hyprland-session.json")
 
-# Переопределения команд запуска. Нужны ТОЛЬКО там, где автоопределение
-# (через .desktop-файлы и /proc/<pid>/cmdline) ошибается или не находит команду.
-LAUNCH_COMMANDS = {
-    "zen": "/opt/zen-browser-bin/zen-bin",
-    "gog_com-RimWorld_1": "/home/mefue/Games/RimWorld/start.sh",
+# Лог не должен расти бесконечно: при превышении LOG_MAX_BYTES
+# оставляем последние LOG_KEEP_LINES строк.
+LOG_MAX_BYTES = 256 * 1024
+LOG_KEEP_LINES = 500
+
+
+def migrate_legacy_session():
+    """Переносит сессию старой версии, не удаляя исходный файл."""
+    if os.path.exists(SESSION_FILE) or not os.path.isfile(LEGACY_SESSION_FILE):
+        return
+    os.makedirs(STATE_DIR, exist_ok=True)
+    shutil.copy2(LEGACY_SESSION_FILE, SESSION_FILE)
+
+
+migrate_legacy_session()
+
+# Значения по умолчанию. Пользовательские значения из config.json
+# переопределяют их; отсутствующий конфиг не мешает запуску программы.
+DEFAULT_CONFIG = {
+    "restore_timeout": 45,
+    "settle_seconds": 20,
+    "terminal_shell": os.path.basename(os.environ.get("SHELL") or "/bin/sh"),
+    "launch_commands": {},
+    "ignore_classes": ["", "xdg-desktop-portal-gtk", "xwaylandvideobridge"],
+    "single_instance": ["steam", "discord", "spotify", "org.telegram.desktop", "thunderbird"],
+    "terminals": {
+        "foot": "foot --working-directory={cwd} {shell}",
+        "kitty": "kitty -d {cwd} {shell}",
+        "konsole": "konsole --workdir {cwd} -e {shell}",
+        "Alacritty": "alacritty --working-directory {cwd} -e {shell}",
+    },
+    "refresh_special": True,
 }
 
-# Классы окон, которые не нужно сохранять
-IGNORE_CLASSES = {"", "xdg-desktop-portal-gtk", "xwaylandvideobridge"}
 
-# Приложения, у которых один процесс сам открывает все окна:
-# запускаем один раз, даже если окон в сессии несколько.
-SINGLE_INSTANCE = {"steam", "discord", "spotify", "org.telegram.desktop", "thunderbird"}
+def as_int(value, name, fallback):
+    """Числовые параметры конфига приводим к int, при ошибке — дефолт."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        print(f"Параметр {name}={value!r} не число — использую {fallback}.", file=sys.stderr)
+        return fallback
 
-# Терминалы: шаблон запуска с рабочей директорией
-TERMINALS = {
-    "foot": "foot --working-directory={cwd} {shell}",
-    "kitty": "kitty -d {cwd} {shell}",
-    "konsole": "konsole --workdir {cwd} -e {shell}",
-    "Alacritty": "alacritty --working-directory {cwd} -e {shell}",
-}
 
-# После расстановки «встряхнуть» special workspace (показать и скрыть),
-# чтобы Hyprland пересчитал раскладку окон внутри него.
-REFRESH_SPECIAL = True
+def load_config():
+    config = DEFAULT_CONFIG.copy()
+    # Вложенные словари копируем отдельно, чтобы не менять DEFAULT_CONFIG.
+    for key in ("launch_commands", "terminals"):
+        config[key] = DEFAULT_CONFIG[key].copy()
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            user_config = json.load(f)
+        if not isinstance(user_config, dict):
+            raise ValueError("корневой элемент конфига должен быть JSON-объектом")
+        for key, value in user_config.items():
+            if key in ("launch_commands", "terminals") and isinstance(value, dict):
+                config[key].update(value)
+            elif key in ("ignore_classes", "single_instance") and isinstance(value, list):
+                config[key] = value
+            elif key in DEFAULT_CONFIG and key not in ("launch_commands", "terminals", "ignore_classes", "single_instance"):
+                config[key] = value
+    except FileNotFoundError:
+        pass
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(f"Не удалось прочитать конфиг {CONFIG_FILE}: {e}. Использую настройки по умолчанию.", file=sys.stderr)
+    # Числовые параметры могли прийти из JSON строками — приводим к норме.
+    for key in ("restore_timeout", "settle_seconds"):
+        config[key] = as_int(config[key], key, DEFAULT_CONFIG[key])
+    return config
+
+
+CONFIG = load_config()
+RESTORE_TIMEOUT = CONFIG["restore_timeout"]
+SETTLE_SECONDS = CONFIG["settle_seconds"]
+TERMINAL_SHELL = CONFIG["terminal_shell"]
+LAUNCH_COMMANDS = CONFIG["launch_commands"]
+IGNORE_CLASSES = set(CONFIG["ignore_classes"])
+SINGLE_INSTANCE = set(CONFIG["single_instance"])
+TERMINALS = CONFIG["terminals"]
+REFRESH_SPECIAL = CONFIG["refresh_special"]
 
 
 def log(msg):
-    with open(LOG_FILE, "a") as f:
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
     print(msg)
+
+
+def trim_log():
+    """Обрезаем разросшийся лог, оставляя последние строки."""
+    try:
+        if not os.path.isfile(LOG_FILE) or os.path.getsize(LOG_FILE) < LOG_MAX_BYTES:
+            return
+        with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        tmp = LOG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(lines[-LOG_KEEP_LINES:])
+        os.replace(tmp, LOG_FILE)
+    except OSError:
+        pass  # обслуживание лога не должно ломать основную работу
 
 
 # ───────────────────────── Hyprland ─────────────────────────
@@ -123,17 +207,31 @@ def clean_exec(line):
     return re.sub(r"\s+--$", "", line)  # хвостовой "--" остаётся от "%u"
 
 
-def build_desktop_index():
-    """class (в нижнем регистре) -> команда из .desktop-файла."""
+def desktop_file_dirs():
+    """Каталоги с .desktop-файлами, от более приоритетных к менее.
+    Учитываем XDG_DATA_HOME / XDG_DATA_DIRS и экспорты Flatpak."""
+    data_home = os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share"))
     dirs = [
-        os.path.expanduser("~/.local/share/applications"),
+        os.path.join(data_home, "applications"),
         os.path.expanduser("~/.local/share/flatpak/exports/share/applications"),
         "/var/lib/flatpak/exports/share/applications",
-        "/usr/local/share/applications",
-        "/usr/share/applications",
     ]
+    for d in os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":"):
+        if d:
+            dirs.append(os.path.join(d, "applications"))
+    unique, seen = [], set()
+    for d in dirs:
+        d = os.path.normpath(d)
+        if d not in seen:
+            seen.add(d)
+            unique.append(d)
+    return unique
+
+
+def build_desktop_index():
+    """class (в нижнем регистре) -> команда из .desktop-файла."""
     index = {}
-    for d in dirs:  # более ранние каталоги имеют приоритет
+    for d in desktop_file_dirs():  # более ранние каталоги имеют приоритет
         for path in glob.glob(os.path.join(d, "*.desktop")):
             try:
                 exec_line = wmclass = None
@@ -221,8 +319,9 @@ def save_session():
         log("Окон для сохранения нет — старую сессию не перезаписываю.")
         return
 
+    os.makedirs(STATE_DIR, exist_ok=True)
     tmp = SESSION_FILE + ".tmp"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(session, f, ensure_ascii=False, indent=1)
     os.replace(tmp, SESSION_FILE)
     log(f"Сессия сохранена. Окон: {len(session)}: {[s['class'] for s in session]}")
@@ -301,7 +400,6 @@ def refresh_special_workspaces(placed):
             time.sleep(0.2)
         toggle_special(short)
 
-#!/usr/bin/env python3
 
 def restore_session():
     if not os.path.exists(SESSION_FILE):
@@ -338,23 +436,29 @@ def restore_session():
             if already:
                 log(f"{cls} уже открыт")
                 continue
-            pending[cls] = list(items)
+            # Одна команда → одно окно: ждём ровно одно окно этого класса.
             to_launch = [items[0]]
         else:
-            pending[cls] = items[already:]
-            to_launch = pending[cls]
+            to_launch = items[already:]
             if already:
                 log(f"{cls}: уже открыто окон: {already}")
 
+        # Запускаем по одному; неудавшиеся элементы выкидываем точечно,
+        # не сбрасывая уже запущенные окна и не прерывая цикл.
+        launched = []
         for item in to_launch:
             cmd = build_cmd(item)
             if not cmd:
                 log(f"Нет команды запуска для {cls}")
-                pending[cls] = []
-                break
+                continue
             log(f"Запуск {cmd}...")
             subprocess.Popen(cmd, shell=True, start_new_session=True)
+            launched.append(item)
 
+        # В очередь ожидания идут только те, что реально запущены.
+        if launched:
+            pending[cls] = launched
+            
     # Шаг 2: ждём появления НОВЫХ окон и расставляем их.
     # Некоторые приложения (например pgAdmin) сначала показывают заставку того же
     # класса, а настоящее окно открывают позже. Если назначенное окно исчезло,
@@ -401,9 +505,15 @@ def restore_session():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "save":
+    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    if arg in ("-h", "--help"):
+        print(__doc__.strip())
+    elif arg == "save":
+        trim_log()
         save_session()
-    elif len(sys.argv) > 1 and sys.argv[1] == "restore":
+    elif arg == "restore":
+        trim_log()
         restore_session()
     else:
-        print("Использование: session-manager.py [save|restore]")
+        print("Использование: session_manager.py [save|restore]")
+        sys.exit(2)
