@@ -10,6 +10,16 @@ REPO_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_HOME="$(mktemp -d)"
 trap 'rm -rf -- "$TEST_HOME"' EXIT
 
+# uninstall.sh и session_manager.py honor XDG_* variables. If the caller
+# has them exported (common), `HOME=$TEST_HOME` alone would still let the
+# uninstaller delete the real state/cache dirs. Pin every XDG location
+# at the throwaway home for the whole run.
+export HOME="$TEST_HOME"
+export XDG_CONFIG_HOME="$TEST_HOME/.config"
+export XDG_DATA_HOME="$TEST_HOME/.local/share"
+export XDG_STATE_HOME="$TEST_HOME/.local/state"
+export XDG_CACHE_HOME="$TEST_HOME/.cache"
+
 SCRIPT="$TEST_HOME/.local/share/hyprland-session-manager/src/session_manager.py"
 LUA="$TEST_HOME/.local/share/hyprland-session-manager/config/session-manager.lua"
 CONFIG="$TEST_HOME/.config/hyprland-session-manager/config.json"
@@ -21,7 +31,7 @@ LOADER='dofile(os.getenv("HOME")'
 step() { printf '\n=== %s\n' "$*"; }
 
 step "fresh install"
-HOME="$TEST_HOME" "$REPO_DIR/install.sh"
+ "$REPO_DIR/install.sh"
 [ -x "$SCRIPT" ]
 [ -f "$LUA" ]
 [ -f "$CONFIG" ]
@@ -32,32 +42,37 @@ grep -qF "$LOADER" "$HOOK"
 echo "layout ok"
 
 step "uninstall (--purge) after a clean install"
-HOME="$TEST_HOME" "$REPO_DIR/uninstall.sh" --purge
+ "$REPO_DIR/uninstall.sh" --purge
 [ ! -e "$TEST_HOME/.local/share/hyprland-session-manager" ]
 [ ! -e "$TEST_HOME/.config/hyprland-session-manager" ]
+[ ! -e "$TEST_HOME/.local/state/hyprland-session-manager" ]   # ← new
+[ ! -e "$TEST_HOME/.cache/hyprland-session-manager" ]         # ← new
 [ ! -e "$SERVICE_UNIT" ]
 [ ! -e "$TIMER_UNIT" ]
 [ ! -e "$HOOK" ]   # created by the installer -> removed with it
 echo "everything removed"
 
 step "reinstall over user-modified files"
-HOME="$TEST_HOME" "$REPO_DIR/install.sh"
+ "$REPO_DIR/install.sh"
 printf '{\n  "restore_timeout": 99\n}\n' > "$CONFIG"
 printf -- '-- user code\nprint("mine")\n' > "$HOOK"
-HOME="$TEST_HOME" "$REPO_DIR/install.sh"
+ "$REPO_DIR/install.sh"
 grep -q '"restore_timeout": 99' "$CONFIG"     # user config preserved
 grep -qF 'print("mine")' "$HOOK"              # user lua preserved
 [ "$(grep -cF "$LOADER" "$HOOK")" -eq 1 ]     # hook added exactly once
 echo "user files intact, no duplicates"
 
 step "final uninstall (--purge) with user lua kept"
-HOME="$TEST_HOME" "$REPO_DIR/uninstall.sh" --purge
+
+ "$REPO_DIR/uninstall.sh" --purge
 [ -f "$HOOK" ]                                # user code survives
 grep -qF 'print("mine")' "$HOOK"
 if grep -qF "$LOADER" "$HOOK"; then           # our lines must be gone
     echo "FAIL: loader line still present in $HOOK" >&2
     exit 1
 fi
+[ ! -e "$TEST_HOME/.local/state/hyprland-session-manager" ]
+[ ! -e "$TEST_HOME/.cache/hyprland-session-manager" ]
 [ ! -e "$TEST_HOME/.local/share/hyprland-session-manager" ]
 [ ! -e "$TEST_HOME/.config/hyprland-session-manager" ]
 echo "clean removal, user lua preserved"
