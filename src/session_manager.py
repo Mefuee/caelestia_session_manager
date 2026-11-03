@@ -452,7 +452,10 @@ def restore_session():
                 log(f"Нет команды запуска для {cls}")
                 continue
             log(f"Запуск {cmd}...")
-            subprocess.Popen(cmd, shell=True, start_new_session=True)
+            # Вместо Popen — просим Hyprland запустить приложение.
+            # Так оно получит ровно то же окружение, что и при нажатии хоткея.
+            safe_cmd = json.dumps(cmd)
+            dispatch(f'hl.dsp.exec({{ command = {safe_cmd} }})')
             launched.append(item)
 
         # В очередь ожидания идут только те, что реально запущены.
