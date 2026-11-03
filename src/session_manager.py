@@ -455,7 +455,7 @@ def restore_session():
             # Вместо Popen — просим Hyprland запустить приложение.
             # Так оно получит ровно то же окружение, что и при нажатии хоткея.
             safe_cmd = json.dumps(cmd)
-            dispatch(f'hl.dsp.exec_cmd({{ command = {safe_cmd} }})')
+            dispatch(f'hl.dsp.exec_cmd({safe_cmd})')
             launched.append(item)
 
         # В очередь ожидания идут только те, что реально запущены.
