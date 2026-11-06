@@ -1,7 +1,7 @@
 {
   "restore_timeout": 45,
   "settle_seconds": 20,
-  "terminal_shell": "bash",
+  "terminal_shell": "fish",
   "launch_commands": {},
   "ignore_classes": [
     "",
